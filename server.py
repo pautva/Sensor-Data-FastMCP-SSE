@@ -81,147 +81,121 @@ def build_location_filter(location_filter: str) -> Optional[str]:
     return None
 
 @mcp.tool
-async def search(
-    query: Optional[str] = None,
-    limit: int = 20,
-    filter: Optional[str] = None,
-    location_filter: Optional[str] = None,
-    format: str = 'json'
-) -> str:
-    """Search and discover sensors/things with advanced filtering"""
+async def search(query: str) -> dict:
+    """Search for sensors/things with the specified query.
+    
+    Args:
+        query: Search query string
+        
+    Returns:
+        Dictionary with 'results' key containing list of matching sensors.
+        Each result includes id, title, text snippet, and URL.
+    """
+    if not query or not query.strip():
+        return {"results": []}
+    
     params = {
-        'limit': limit,
+        'limit': 20,
         'expand': 'Locations,Datastreams',
         'count': True,
-        'format': format
+        'filter': f"(contains(tolower(name), '{query.lower()}') or contains(tolower(description), '{query.lower()}'))"
     }
-    
-    filters = []
-    
-    if query:
-        filters.append(f"(contains(tolower(name), '{query.lower()}') or contains(tolower(description), '{query.lower()}'))")
-    
-    if location_filter:
-        loc_filter = build_location_filter(location_filter)
-        if loc_filter:
-            filters.append(loc_filter)
-    
-    if filter:
-        filters.append(filter)
-    
-    if filters:
-        params['filter'] = ' and '.join(filters)
     
     data = await make_api_request('Things', params)
     
-    if format in ['geojson', 'csv']:
-        return json.dumps(data) if format == 'geojson' else data
+    results = []
+    for sensor in data.get('value', []):
+        # Create text snippet from description and location
+        location_info = ""
+        if sensor.get('Locations'):
+            loc = sensor['Locations'][0]
+            coords = loc['location']['coordinates']
+            location_info = f" Located at {loc['name']} ({coords[1]:.4f}, {coords[0]:.4f})"
+        
+        datastream_info = ""
+        if sensor.get('Datastreams'):
+            ds_count = len(sensor['Datastreams'])
+            datastream_info = f" Has {ds_count} datastream{'s' if ds_count != 1 else ''}"
+        
+        text_snippet = f"{sensor['description'][:200]}{location_info}{datastream_info}"
+        
+        result = {
+            "id": str(sensor['@iot.id']),
+            "title": sensor['name'],
+            "text": text_snippet,
+            "url": f"{BGS_API_BASE}/Things({sensor['@iot.id']})"
+        }
+        results.append(result)
     
-    result = {
-        'message': f"Found {len(data.get('value', []))} sensors",
-        'total_count': data.get('@iot.count', len(data.get('value', []))),
-        'sensors': [
-            {
-                'id': sensor['@iot.id'],
-                'name': sensor['name'],
-                'description': sensor['description'],
-                'properties': sensor.get('properties'),
-                'location': {
-                    'name': sensor['Locations'][0]['name'],
-                    'coordinates': sensor['Locations'][0]['location']['coordinates'],
-                    'type': sensor['Locations'][0]['location']['type']
-                } if sensor.get('Locations') else None,
-                'datastream_count': len(sensor.get('Datastreams', [])),
-                'datastreams': [
-                    {
-                        'id': ds['@iot.id'],
-                        'name': ds['name'],
-                        'unit': ds.get('unitOfMeasurement', {}).get('symbol')
-                    } for ds in sensor.get('Datastreams', [])[:3]
-                ]
-            } for sensor in data.get('value', [])
-        ]
-    }
-    
-    return json.dumps(result, indent=2)
+    return {"results": results}
 
 @mcp.tool
-async def fetch(
-    sensor_id: str,
-    include_datastreams: bool = True,
-    include_locations: bool = True,
-    include_observations: bool = False
-) -> str:
-    """Get comprehensive details about a specific sensor"""
-    expand_parts = []
-    if include_locations:
-        expand_parts.append('Locations')
-    if include_datastreams:
-        expand_parts.append('Datastreams($expand=ObservedProperty,Sensor)')
+async def fetch(id: str) -> dict:
+    """Retrieve complete sensor details by ID.
     
-    params = {'expand': ','.join(expand_parts)} if expand_parts else {}
+    Args:
+        id: Sensor ID (Thing ID) to fetch
+        
+    Returns:
+        Complete sensor details with id, title, full text content, URL, and metadata
+    """
+    if not id:
+        raise ValueError("Sensor ID is required")
     
-    data = await make_api_request(f'Things({sensor_id})', params)
+    # Fetch sensor details with full expansion
+    params = {
+        'expand': 'Locations,Datastreams($expand=ObservedProperty,Sensor)'
+    }
+    
+    data = await make_api_request(f'Things({id})', params)
+    
+    # Build comprehensive text content
+    text_parts = []
+    text_parts.append(f"Name: {data['name']}")
+    text_parts.append(f"Description: {data['description']}")
+    
+    # Add location information
+    if data.get('Locations'):
+        for loc in data['Locations']:
+            coords = loc['location']['coordinates']
+            text_parts.append(f"\nLocation: {loc['name']}")
+            text_parts.append(f"Coordinates: {coords[1]:.6f}, {coords[0]:.6f}")
+            text_parts.append(f"Location Description: {loc['description']}")
+    
+    # Add datastream information
+    if data.get('Datastreams'):
+        text_parts.append(f"\nDatastreams ({len(data['Datastreams'])}):")  
+        for ds in data['Datastreams']:
+            text_parts.append(f"- {ds['name']}: {ds['description']}")
+            unit = ds.get('unitOfMeasurement', {})
+            if unit:
+                text_parts.append(f"  Unit: {unit.get('name', 'N/A')} ({unit.get('symbol', '')})")
+            
+            # Add observed property info
+            obs_prop = ds.get('ObservedProperty', {})
+            if obs_prop:
+                text_parts.append(f"  Observed Property: {obs_prop.get('name', 'N/A')}")
+                text_parts.append(f"  Definition: {obs_prop.get('definition', 'N/A')}")
+    
+    # Add properties if available
+    if data.get('properties'):
+        text_parts.append(f"\nProperties: {json.dumps(data['properties'], indent=2)}")
+    
+    full_text = "\n".join(text_parts)
     
     result = {
-        'sensor': {
-            'id': data['@iot.id'],
-            'name': data['name'],
-            'description': data['description'],
-            'properties': data.get('properties'),
-            'locations': [
-                {
-                    'id': loc['@iot.id'],
-                    'name': loc['name'],
-                    'description': loc['description'],
-                    'coordinates': loc['location']['coordinates'],
-                    'type': loc['location']['type'],
-                    'encoding_type': loc['encodingType']
-                } for loc in data.get('Locations', [])
-            ],
-            'datastreams': [
-                {
-                    'id': ds['@iot.id'],
-                    'name': ds['name'],
-                    'description': ds['description'],
-                    'unit': ds['unitOfMeasurement'],
-                    'observed_property': {
-                        'id': ds.get('ObservedProperty', {}).get('@iot.id'),
-                        'name': ds.get('ObservedProperty', {}).get('name'),
-                        'definition': ds.get('ObservedProperty', {}).get('definition'),
-                        'description': ds.get('ObservedProperty', {}).get('description')
-                    },
-                    'sensor_hardware': {
-                        'id': ds.get('Sensor', {}).get('@iot.id'),
-                        'name': ds.get('Sensor', {}).get('name'),
-                        'description': ds.get('Sensor', {}).get('description'),
-                        'metadata': ds.get('Sensor', {}).get('metadata')
-                    }
-                } for ds in data.get('Datastreams', [])
-            ]
+        "id": str(data['@iot.id']),
+        "title": data['name'],
+        "text": full_text,
+        "url": f"{BGS_API_BASE}/Things({data['@iot.id']})",
+        "metadata": {
+            "location_count": len(data.get('Locations', [])),
+            "datastream_count": len(data.get('Datastreams', [])),
+            "properties": data.get('properties')
         }
     }
     
-    if include_observations:
-        try:
-            obs_data = await make_api_request(f'Things({sensor_id})/Datastreams/Observations', {
-                'limit': 10,
-                'orderby': 'phenomenonTime desc',
-                'expand': 'Datastream'
-            })
-            
-            result['sensor']['recent_observations'] = [
-                {
-                    'id': obs['@iot.id'],
-                    'result': obs['result'],
-                    'time': obs['phenomenonTime'],
-                    'datastream_name': obs.get('Datastream', {}).get('name')
-                } for obs in obs_data.get('value', [])
-            ]
-        except:
-            result['sensor']['recent_observations'] = []
-    
-    return json.dumps(result, indent=2)
+    return result
 
 # Additional tools for comprehensive API access
 @mcp.tool
@@ -601,10 +575,5 @@ async def get_api_info() -> str:
 if __name__ == "__main__":
     import asyncio
     port = int(os.environ.get("PORT", 8000))
-    asyncio.run(
-        mcp.run_sse_async(
-            host="0.0.0.0",  # Changed from 127.0.0.1 to allow external connections
-            port=port,
-            log_level="debug"
-        )
-    )
+    # Use FastMCP's built-in SSE transport for ChatGPT compatibility
+    mcp.run(transport="sse", host="0.0.0.0", port=port)
