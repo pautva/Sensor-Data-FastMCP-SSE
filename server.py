@@ -81,7 +81,7 @@ def build_location_filter(location_filter: str) -> Optional[str]:
     return None
 
 @mcp.tool
-async def search_sensors(
+async def search(
     query: Optional[str] = None,
     limit: int = 20,
     filter: Optional[str] = None,
@@ -146,7 +146,7 @@ async def search_sensors(
     return json.dumps(result, indent=2)
 
 @mcp.tool
-async def get_sensor_details(
+async def fetch(
     sensor_id: str,
     include_datastreams: bool = True,
     include_locations: bool = True,
@@ -222,6 +222,28 @@ async def get_sensor_details(
             result['sensor']['recent_observations'] = []
     
     return json.dumps(result, indent=2)
+
+# Additional tools for comprehensive API access
+@mcp.tool
+async def search_sensors(
+    query: Optional[str] = None,
+    limit: int = 20,
+    filter: Optional[str] = None,
+    location_filter: Optional[str] = None,
+    format: str = 'json'
+) -> str:
+    """Alias for search function - search and discover sensors/things with advanced filtering"""
+    return await search(query, limit, filter, location_filter, format)
+
+@mcp.tool
+async def get_sensor_details(
+    sensor_id: str,
+    include_datastreams: bool = True,
+    include_locations: bool = True,
+    include_observations: bool = False
+) -> str:
+    """Alias for fetch function - get comprehensive details about a specific sensor"""
+    return await fetch(sensor_id, include_datastreams, include_locations, include_observations)
 
 @mcp.tool
 async def get_datastreams(
